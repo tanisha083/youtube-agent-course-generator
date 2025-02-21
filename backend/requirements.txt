@@ -1,0 +1,27 @@
+fastapi
+uvicorn
+sqlalchemy
+asyncpg
+python-dotenv
+yt-dlp
+numba==0.56.4 
+langchain
+langchain-groq
+langchain-core
+langchain-community
+langchain-google-genai
+langgraph
+scipy>=1.16.5,<1.23.0  # Specify compatible version range!
+numpy>=1.16.5,<1.23.0 
+base64
+httpx
+youtube-transcript-api==0.6.1
+openai-whisper
+pydantic
+scenedetect
+Pillow
+fiftyone
+requests
+tenacity
+google-api-core
+maxim
