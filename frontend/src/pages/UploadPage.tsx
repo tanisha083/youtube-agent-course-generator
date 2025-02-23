@@ -430,7 +430,7 @@ const UploadPage: React.FC = () => {
                         {/* Quiz Tab (Tab 1) - Sleek Design */}
                         {activeTab === 1 && response?.course?.quiz_content?.quizzes && (
                             <Box sx={{ mt: 3, }}>
-                                <Typography variant="h5" gutterBottom sx={{ fontWeight: 'bold', textAlign: 'center', mb: 4, color: 'text.primary' }}>
+                                <Typography variant="h5" gutterBottom sx={{ fontWeight: 'bold', textAlign: 'left', mb: 4, color: 'text.primary' }}>
                                     Interactive Quiz
                                 </Typography>
                                 {response.course.quiz_content.quizzes.map((quiz, quizIndex) => (
