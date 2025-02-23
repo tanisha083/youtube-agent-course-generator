@@ -1,28 +1,38 @@
-# agentic.py
-import os
-import logging
+"""
+agentic.py: Agentic Workflow for Video-to-Course Conversion
+
+Implements a LangGraph state graph to automate conversion of video content into structured courses.
+Takes video transcripts and extracted frames as input and orchestrates an agentic workflow to:
+- Structure content into modules and sections.
+- Select relevant frames as visual aids.
+- Generate detailed course content (lessons).
+- Design quizzes for assessment.
+- Develop retention-focused learning strategies.
+"""
+
 import json
-from typing import TypedDict, List, Dict, Optional, Any
+import logging
+import os
+import time
+from typing import Dict, List, Optional, TypedDict
+from uuid import uuid4
+from dotenv import load_dotenv
+import google.api_core.exceptions
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain.prompts import ChatPromptTemplate, PromptTemplate
-from langchain.schema import Document, AIMessage, BaseMessage, HumanMessage
-from langgraph.graph import StateGraph, END
-from langgraph.checkpoint.memory import MemorySaver
-from dotenv import load_dotenv
-import time
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
-import google.api_core.exceptions
+from langchain.schema import HumanMessage
 from langchain_groq import ChatGroq
-from uuid import uuid4
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.graph import StateGraph, END
 from maxim import Maxim, Config
-from maxim.logger.components.trace import TraceConfig
 from maxim.logger import LoggerConfig
-from maxim.logger.components.span import SpanConfig
 from maxim.logger.components.generation import GenerationConfig
-from app.api.utils import clean_json_string, encode_image
+from maxim.logger.components.span import SpanConfig
+from maxim.logger.components.trace import TraceConfig
 from maxim.types import GenerationRequestMessage
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+from app.api.utils import clean_json_string, encode_image
 
-# --- Logging Configuration ---
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -30,20 +40,13 @@ logging.basicConfig(
 logger = logging.getLogger("langgraph_agentic")
 load_dotenv()
 
-# --- API Keys ---
 gemini_api_key = os.environ.get("GEMINI_API_KEY")
-# google_api_key = os.environ.get("GOOGLE_API_KEY")
-# google_cse_id = os.environ.get("GOOGLE_CSE_ID")
 groq_api_key = os.environ.get("GROQ_API_KEY")
 maxim_api_key = os.environ.get("MAXIM_API_KEY")
 log_repository_id = os.environ.get("LOG_REPO_ID")
 
 if not gemini_api_key:
     raise ValueError("GEMINI_API_KEY environment variable not set.")
-# if not google_api_key:
-#     raise ValueError("GOOGLE_API_KEY environment variables not set.")
-# if not google_cse_id:
-#     raise ValueError("GOOGLE_CSE_ID environment variable not set.")
 if not groq_api_key:
     raise ValueError("GROQ_API_KEY environment variable not set.")
 if not maxim_api_key:
@@ -51,25 +54,22 @@ if not maxim_api_key:
 if not log_repository_id:
     raise ValueError("LOG_REPO_ID environment variable not set.")
 
-# --- Maxim Logger Initialization ---
 maxim_client = Maxim(Config(api_key=maxim_api_key))
 maxim_logger = maxim_client.logger(LoggerConfig(id=log_repository_id))
-trace = maxim_logger.trace(TraceConfig(
-    id="6cae1872-d97c-4836-8b3b-d19a2f0a736b", # unique id of the trace
-    name="user-course-generation",
-))
+trace = maxim_logger.trace(TraceConfig(id=str(uuid4()), name="user-course-generation"))
 
-# --- GraphState ---
+# pylint: disable=line-too-long
+
 class GraphState(TypedDict):
+    """State representation for the content generation graph."""
     transcript: str
     frames: List[Dict[str, str]]
     structured_content: Dict
     course_content: Dict
     quiz_content: Dict
     retention_plan: Dict
-    trace_id: Optional[str] 
+    trace_id: Optional[str]
 
-# --- LLM Initialization ---
 gemini_llm = ChatGoogleGenerativeAI(
     model="gemini-1.5-flash",
     temperature=0.7,
@@ -87,7 +87,8 @@ logger.info("Initialized Groq with llama-3.2-90b-vision-preview.")
 memory = MemorySaver()
 
 def log_retry_error(retry_state):
-    logger.error(f"Retrying: {retry_state}")
+    """Log retry error."""
+    logger.error("Retrying: %s", retry_state)
 
 @retry(
     stop=stop_after_attempt(3),
@@ -95,67 +96,67 @@ def log_retry_error(retry_state):
     retry=retry_if_exception_type(google.api_core.exceptions.ResourceExhausted),
     retry_error_callback=log_retry_error
 )
-def call_gemini_with_retry(chain, input_data, generation_config: GenerationConfig):
-    """Calls Gemini with retries and MANUAL Maxim logging."""
-    generation = trace.generation(generation_config) # Create Generation span
+def call_gemini_with_retry(chain, input_data, generation_config: GenerationConfig, span):
+    """Call Gemini with retries and log the generation result."""
+    generation = span.generation(generation_config)
     try:
         result = chain.invoke(input_data)
         content = result.content
-        gemini_response = { 
+        gemini_response = {
             "id": str(uuid4()),
             "object": "text_completion",
             "created": int(time.time()),
             "model": generation_config.model,
             "choices": [{"index": 0, "text": content, "finish_reason": "stop"}],
             "usage": {
-                "prompt_tokens": len(str(input_data)),  # Estimate
+                "prompt_tokens": len(str(input_data)),
                 "completion_tokens": len(content),
                 "total_tokens": len(str(input_data)) + len(content),
             },
         }
-        generation.result(gemini_response) # ALWAYS call .result()
+        generation.result(gemini_response)
         return result
     except Exception as e:
-        logger.exception(f"Gemini call failed: {e}")
-        generation.result({"error": str(e)})  # Log the error
+        logger.exception("Gemini call failed: %s", e)
+        generation.result({"error": str(e)})
         raise
     finally:
-        generation.end()  # ALWAYS end the generation
-
+        generation.end()
 
 @retry(
     stop=stop_after_attempt(3),
     wait=wait_exponential(multiplier=1, min=2, max=10),
     retry_error_callback=log_retry_error
 )
-def call_groq_with_retry(chain, input_data, generation_config: GenerationConfig):
-    """Calls Groq with retries and MANUAL Maxim logging."""
-    generation = trace.generation(generation_config) # Create Generation
+def call_groq_with_retry(chain, input_data, generation_config: GenerationConfig, span):
+    """Call Groq with retries and log the generation result."""
+    generation = span.generation(generation_config)
     try:
         result = chain.invoke(input_data)
         content = result.content
-        gemini_response = {  # ALWAYS in OpenAI format
+        gemini_response = {
             "id": str(uuid4()),
             "object": "text_completion",
             "created": int(time.time()),
             "model": generation_config.model,
             "choices": [{"index": 0, "text": content, "finish_reason": "stop"}],
             "usage": {
-                "prompt_tokens": len(str(input_data)),  # Estimate!
+                "prompt_tokens": len(str(input_data)),
                 "completion_tokens": len(content),
                 "total_tokens": len(str(input_data)) + len(content),
             },
         }
-        generation.result(gemini_response) # ALWAYS call .result()
+        generation.result(gemini_response)
         return result
     except Exception as e:
-        logger.exception(f"Groq call failed: {e}")
-        generation.result({"error": str(e)})  # Log the error
+        logger.exception("Groq call failed: %s", e)
+        generation.result({"error": str(e)})
         raise
     finally:
-        generation.end()  # ALWAYS end the generation
+        generation.end()
 
 def content_structurer(state: GraphState) -> GraphState:
+    """Generate a blog-style course structure from the given transcript."""
     logger.info("Running Content Structurer Node")
     content_structurer_span = trace.span(SpanConfig(id=str(uuid4()), name="Content Structurer"))
     content_structurer_span.event("content_structurer_start", "Content Structurer Start")
@@ -201,28 +202,23 @@ Transcript:
 {transcript}
 """
     prompt = PromptTemplate.from_template(prompt_template)
-    chain = prompt | gemini_llm
+    chain = prompt | gemini_llm # pylint: disable=unsupported-binary-operation
 
     messages_content = prompt_template.format(transcript=state["transcript"])
     messages = [GenerationRequestMessage(role="user", content=messages_content)]
-    
     generation_config = GenerationConfig(
-            id=str(uuid4()),
-            name="Content Structure Generation",
-            provider="google",
-            model="gemini-1.5-flash",
-            model_parameters={"temperature": 0.7},
-            messages=messages,  
-        )
-
-
-    generation = trace.generation(generation_config)
-    logger.info('generation done')
+        id=str(uuid4()),
+        name="Content Structure Generation",
+        provider="google",
+        model="gemini-1.5-flash",
+        model_parameters={"temperature": 0.7},
+        messages=messages,
+    )
+    generation = content_structurer_span.generation(generation_config)
 
     try:
-        # --- Directly use chain.invoke ---
         response = chain.invoke({"transcript": state["transcript"]})
-        logger.info(f"Content Structurer output: {response}")
+        logger.info("Content Structurer output: %s", response)
         cleaned_content = clean_json_string(response.content)
         structured_content_json = json.loads(cleaned_content)
         state["structured_content"] = structured_content_json
@@ -231,32 +227,32 @@ Transcript:
             "id": str(uuid4()),
             "object": "text_completion",
             "created": int(time.time()),
-            "model": "gemini-1.5-flash",  
+            "model": "gemini-1.5-flash",
             "choices": [{"index": 0, "text": cleaned_content, "finish_reason": "stop"}],
             "usage": {
-                "prompt_tokens": len(str(state["transcript"])),  
+                "prompt_tokens": len(str(state["transcript"])),
                 "completion_tokens": len(cleaned_content),
                 "total_tokens": len(str(state["transcript"])) + len(cleaned_content),
             },
         }
-        logger.info(f"gemini response: {gemini_response}")
-        generation.result(gemini_response)  
-
+        logger.info("gemini response: %s", gemini_response)
+        generation.result(gemini_response)
         content_structurer_span.event("content_structurer_success", "Content Structurer Succeeded")
-
-    except (json.JSONDecodeError, Exception) as e:
-        logger.exception(f"Content Structurer error: {e}")
-        content_structurer_span.event("content_structurer_error", "Error in Content Structurer", {"error": str(e)})
-        generation.result({"error": str(e)}) 
+    except (json.JSONDecodeError, ValueError, google.api_core.exceptions.GoogleAPIError) as e:
+        logger.exception("Content Structurer error: %s", e)
+        content_structurer_span.event("content_structurer_error",
+                                    "Error in Content Structurer",
+                                    {"error": str(e)})
+        generation.result({"error": str(e)})
         state["structured_content"] = {}
     finally:
-        generation.end()      
-        content_structurer_span.end()  
+        generation.end()
+        content_structurer_span.end()
     return state
 
 def frame_selector(state: GraphState) -> GraphState:
+    """Select frames from the video based on relevancy."""
     logger.info("Running Frame Selector Node")
-
     frame_selector_span = trace.span(SpanConfig(id=str(uuid4()), name="Frame Selector"))
     frame_selector_span.event("frame_selector_start", "Frame Selector Start")
 
@@ -272,26 +268,28 @@ def frame_selector(state: GraphState) -> GraphState:
             start_ts = float(section["start_ts"])
             end_ts = float(section["end_ts"])
             section_content = state["transcript"][int(start_ts):int(end_ts)]
-            section_frames = [] # Initialize section_frames for each section
+            section_frames = []
 
             for frame in frames:
-                frame_ts = float(frame["timestamp"]) # Ensure float for comparison
-
+                frame_ts = float(frame["timestamp"])
                 if start_ts <= frame_ts <= end_ts:
-                    section_frames.append(frame) # Add frame to section_frames if timestamp is within range
+                    section_frames.append(frame) # Add frame to section if timestamp is within range
 
             if "frames" not in section:
-                section["frames"] = [] # Initialize frames list in section
+                section["frames"] = []
 
             if section_frames: # Process section_frames only if it's not empty
-                logger.info(f"Processing {len(section_frames)} frames for section: '{section['section_title']}'")
-                for frame_index, frame in enumerate(section_frames): # Iterate through section_frames
-                    logger.info(f"Processing frame: {frame['path']} (Index within section: {frame_index}) for section: '{section['section_title']}'")
+                logger.info("Processing %d frames for section: '%s'",
+                            len(section_frames),
+                            section['section_title'])
+                for frame_index, frame in enumerate(section_frames): #Iterate through section_frames
+                    logger.info("Processing frame: %s (Index within section: %d) for section: '%s'",
+                                frame['path'], frame_index, section['section_title'])
 
                     image_path = os.path.join(os.getcwd(), frame["path"].lstrip('/'))
                     base64_image = encode_image(image_path)
                     if not base64_image:
-                        logger.warning(f"Skipping frame {frame['path']} due to encoding failure.")
+                        logger.warning("Skipping frame %s due to encoding failure.", frame["path"])
                         continue
 
                     image_data_item = {
@@ -300,73 +298,85 @@ def frame_selector(state: GraphState) -> GraphState:
                     }
 
                     user_prompt_text = (
-                        "**You MUST respond *only* with valid JSON. Do not include any introductory text, explanations, or markdown formatting. Just the JSON object.**\n\n"
+                        "**You MUST respond *only* with valid JSON. Do not include any introductory text, explanations, \
+                        or markdown formatting. Just the JSON object.**\n\n"
                         f"Module content:\n{module_content}\n\n"
                         f"Section content:\n{section_content}\n\n"
                         "Given this module and section context, and the provided image, determine if the image is relevant "
                         "to the *section*. "
                         "If the image IS relevant, ALSO generate a short caption (1-2 sentences) for it. "
                         "Return a JSON object in one of these two formats:\n"
-                        "- If the image is relevant: `{\"relevant\": true, \"info\": \"Your 1-2 sentence reason\", \"caption\": \"Generated caption\"}`\n"
+                        "- If the image is relevant: `{\"relevant\": true, \"info\": \"Your 1-2 sentence reason\", \
+                        \"caption\": \"Generated caption\"}`\n"
                         "- If the image is NOT relevant: `{\"relevant\": false}`\n\n"
-                        "Example of a relevant response: `{\"relevant\": true, \"info\": \"This image shows the device setup.\", \"caption\": \"The experimental setup with the sensor attached.\"}`\n"
+                        "Example of a relevant response: `{\"relevant\": true, \"info\": \"This image shows the device setup.\", \
+                        \"caption\": \"The experimental setup with the sensor attached.\"}`\n"
                         "Example of a not relevant response: `{\"relevant\": false}`\n\n"
-                        "**Remember, ONLY output the JSON.  No other text. you are strictly told to only return expected json else u will be heavily penalized**" # Re-emphasize JSON only
+                        "**Remember, ONLY output the JSON.  No other text. you are strictly told to only \
+                            return expected json else u will be heavily penalized**"
                     )
 
                     message_content = [
                         {"type": "text", "text": user_prompt_text},
                         image_data_item,
                     ]
-                    messages = [GenerationRequestMessage(role="user",content=message_content)]
-
+                    messages = [GenerationRequestMessage(role="user", content=message_content)]
                     generation_config = GenerationConfig(
                         id=str(uuid4()),
                         name=f"Frame Relevance - Mod {module_index}, Sec {section_index}, Frame {frame_index}",
                         provider="groq",
                         model="llama-3.2-90b-vision-preview",
                         model_parameters={"temperature": 0.7},
-                        messages=messages
+                        messages=messages,
                     )
-
                     message_to_llama = [HumanMessage(content=message_content)]
 
                     try:
-                        response = call_groq_with_retry(groq_llm, message_to_llama, generation_config)
+                        response = call_groq_with_retry(groq_llm,
+                                                        message_to_llama,
+                                                        generation_config,
+                                                        frame_selector_span)
                         cleaned_response = clean_json_string(response.content)
-                        logger.info(f"Frame processing response: {cleaned_response}")
+                        logger.info("Frame processing response: %s", cleaned_response)
                         result = json.loads(cleaned_response)
-
                         if isinstance(result, dict) and result.get("relevant") is True:
                             if "info" in result and "caption" in result:
                                 section["frames"].append({
-                                    "frame_path": frame['path'],
+                                    "frame_path": frame["path"],
                                     "caption": result["caption"],
                                     "info": result["info"],
                                     "timestamp": float(frame["timestamp"]),
                                 })
                                 selected_frames_with_info.append(frame)
-                                logger.info( f'timestamp: {frame["timestamp"]} appended to section: {section["section_title"]}')
-                    except (json.JSONDecodeError, Exception) as e:
-                        logger.exception(f"Frame processing error: {e}")
-                        frame_selector_span.event("frame_selection_error", "Error in frame selection", {"error": str(e)})
-
+                                logger.info("Timestamp %s appended to section: %s",
+                                            frame["timestamp"], section["section_title"])
+                        frame_selector_span.event(
+                                    "frame_selection_success",
+                                    "Successfully generated frame relevance result"
+                                )
+                    except (json.JSONDecodeError, ValueError, KeyError) as e:
+                        logger.exception("Frame processing error: %s", e)
+                        frame_selector_span.event("frame_selection_error",
+                                                  "Error in frame selection",
+                                                  {"error": str(e)})
             else:
-                frame_selector_span.event("no_frames_in_range", f"No frames in range for section: {section['section_title']}")
+                frame_selector_span.event("no_frames_in_range",
+                                          f"No frames in range for section: {section['section_title']}")
     frame_selector_span.end()
     state["frames"] = selected_frames_with_info
     return state
 
 def course_content_generator(state: GraphState) -> GraphState:
+    """Generate course content based on structured content and selected frames."""
     logger.info("Running Course Content Generator Node")
     course_content_span = trace.span(SpanConfig(id=str(uuid4()), name="Course Content Generator"))
-    course_content_span.event("course_content_start", "Course Content Start")
+    course_content_span.event("course_content_generation_start", "Course Content Generation Start")
 
     structured_content_with_frames = state["structured_content"].copy()
     for module_index, module in enumerate(structured_content_with_frames["modules"]):
         for section_index, section in enumerate(module["sections"]):
             if "frames" in section:
-                 structured_content_with_frames["modules"][module_index]["sections"][section_index]["media"] = section["frames"]
+                structured_content_with_frames["modules"][module_index]["sections"][section_index]["media"] = section["frames"]
             else:
                 structured_content_with_frames["modules"][module_index]["sections"][section_index]["media"] = []
 
@@ -410,30 +420,39 @@ Output JSON in the specified format.  Do NOT include markdown code blocks.
         ("system", system_message),
         ("user", prompt_template)
     ])
-
-    chain = prompt | gemini_llm
-
-    messages = [GenerationRequestMessage(role="system", content=system_message),GenerationRequestMessage(role="user", content=prompt_template.format(structured_content_with_frames=json.dumps(structured_content_with_frames), transcript=state["transcript"]))]
+    chain = prompt | gemini_llm # pylint: disable=unsupported-binary-operation
+    messages = [
+        GenerationRequestMessage(role="system", content=system_message),
+        GenerationRequestMessage(role="user", content=prompt_template.format(
+            structured_content_with_frames=json.dumps(structured_content_with_frames),
+            transcript=state["transcript"]
+        )),
+    ]
     generation_config = GenerationConfig(
         id=str(uuid4()),
         name="Course Content Generation",
         provider="google",
         model="gemini-1.5-flash",
         model_parameters={"temperature": 0.7},
-        messages=messages
+        messages=messages,
     )
 
     try:
-        course_content_response = call_gemini_with_retry(chain, {
-            "structured_content_with_frames": json.dumps(structured_content_with_frames),
-            "transcript": state["transcript"]
-        }, generation_config)
+        course_content_response = call_gemini_with_retry(
+            chain,
+            {
+                "structured_content_with_frames": json.dumps(structured_content_with_frames),
+                "transcript": state["transcript"],
+            },
+            generation_config,
+            course_content_span
+        )
         cleaned_content = clean_json_string(course_content_response.content)
-        logger.info(f"Course Content Generation output: {cleaned_content}")
+        logger.info("Course Content Generation output: %s", cleaned_content)
         state["course_content"] = json.loads(cleaned_content)
-
-    except (json.JSONDecodeError, Exception) as e:
-        logger.exception(f"Course Content Generation error: {e}")
+        course_content_span.event("course_content_generation_success", "Course Content Generation Succeeded")
+    except (json.JSONDecodeError, ValueError, google.api_core.exceptions.GoogleAPIError) as e:
+        logger.exception("Course Content Generation error: %s", e)
         course_content_span.event("course_content_error", "Error in course content generation", {"error": str(e)})
         state["course_content"] = {"modules": []}
     finally:
@@ -441,6 +460,7 @@ Output JSON in the specified format.  Do NOT include markdown code blocks.
     return state
 
 def quiz_architect(state: GraphState) -> GraphState:
+    """Generate quiz questions based on the structured content."""
     logger.info("Running Quiz Architect Node")
     quiz_architect_span = trace.span(SpanConfig(id=str(uuid4()), name="Quiz Architect"))
     quiz_architect_span.event("quiz_architect_start", "Quiz Architect Start")
@@ -485,25 +505,31 @@ def quiz_architect(state: GraphState) -> GraphState:
     """
 
     prompt = PromptTemplate.from_template(prompt_template)
-    chain = prompt | gemini_llm
-
-    messages = [GenerationRequestMessage(role="user", content=prompt_template.format(structured_content=state["structured_content"]))]
-
+    chain = prompt | gemini_llm # pylint: disable=unsupported-binary-operation
+    messages = [GenerationRequestMessage(role="user", content=prompt_template.format(
+        structured_content=state["structured_content"]
+    ))]
     generation_config = GenerationConfig(
         id=str(uuid4()),
         name="Quiz Generation",
         provider="google",
         model="gemini-1.5-flash",
         model_parameters={"temperature": 0.7},
-        messages=messages
+        messages=messages,
     )
     try:
-        quiz_content = call_gemini_with_retry(chain, {"structured_content": state["structured_content"]}, generation_config)
+        quiz_content = call_gemini_with_retry(
+            chain,
+            {"structured_content": state["structured_content"]},
+            generation_config,
+            quiz_architect_span
+        )
         cleaned_content = clean_json_string(quiz_content.content)
-        logger.info(f"Quiz Architect output: {cleaned_content}")
+        logger.info("Quiz Architect output: %s", cleaned_content)
         state["quiz_content"] = json.loads(cleaned_content)
-    except (json.JSONDecodeError, Exception) as e:
-        logger.exception(f"Quiz Architect error: {e}")
+        quiz_architect_span.event("quiz_architect_success", "Quiz Architect Succeeded")
+    except (json.JSONDecodeError, ValueError, google.api_core.exceptions.GoogleAPIError) as e:
+        logger.exception("Quiz Architect error: %s", e)
         quiz_architect_span.event("quiz_architect_error", "Error in Quiz Architect", {"error": str(e)})
         state["quiz_content"] = {"quizzes": []}
     finally:
@@ -511,6 +537,7 @@ def quiz_architect(state: GraphState) -> GraphState:
     return state
 
 def retention_designer(state: GraphState) -> GraphState:
+    """Design a retention plan based on structured content."""
     logger.info("Running Retention Designer Node")
     retention_designer_span = trace.span(SpanConfig(id=str(uuid4()), name="Retention Designer"))
     retention_designer_span.event("retention_designer_start", "Retention Designer Start")
@@ -552,25 +579,31 @@ Structured Content:
 {structured_content}
 """
     prompt = PromptTemplate.from_template(prompt_template)
-    chain = prompt | gemini_llm
-
-    messages = [GenerationRequestMessage(role="user", content=prompt_template.format(structured_content=state["structured_content"]))]
+    chain = prompt | gemini_llm # pylint: disable=unsupported-binary-operation
+    messages = [GenerationRequestMessage(role="user", content=prompt_template.format(
+        structured_content=state["structured_content"]
+    ))]
     generation_config = GenerationConfig(
         id=str(uuid4()),
         name="Retention Plan Generation",
         provider="google",
         model="gemini-1.5-flash",
         model_parameters={"temperature": 0.7},
-        messages=messages
+        messages=messages,
     )
-
     try:
-        retention_plan = call_gemini_with_retry(chain, {"structured_content": state["structured_content"]}, generation_config)
+        retention_plan = call_gemini_with_retry(
+            chain,
+            {"structured_content": state["structured_content"]},
+            generation_config,
+            retention_designer_span
+        )
         cleaned_content = clean_json_string(retention_plan.content)
-        logger.info(f"Retention Designer output: {cleaned_content}")
+        logger.info("Retention Designer output: %s", cleaned_content)
         state["retention_plan"] = json.loads(cleaned_content)
-    except (json.JSONDecodeError, Exception) as e:
-        logger.exception(f"Retention Designer error: {e}")
+        retention_designer_span.event("retention_design_success", "Retention Designer Succeeded")
+    except (json.JSONDecodeError, ValueError, google.api_core.exceptions.GoogleAPIError) as e:
+        logger.exception("Retention Designer error: %s", e)
         retention_designer_span.event("retention_design_error", "Error in retention design", {"error": str(e)})
         state["retention_plan"] = {"retention_plan": {"module_retention": [], "overall_summary": ""}}
     finally:
@@ -578,7 +611,7 @@ Structured Content:
     return state
 
 def retention_tip_executor(state: GraphState) -> GraphState:
-    """Executes retention tips by generating content based on tip type."""
+    """Execute retention tips by generating additional content based on tip type."""
     logger.info("Running Retention Tip Executor Node")
     retention_tip_executor_span = trace.span(SpanConfig(id=str(uuid4()), name="Retention Tip Executor"))
     retention_tip_executor_span.event("retention_tip_executor_start", "Retention Tip Executor Start")
@@ -587,7 +620,7 @@ def retention_tip_executor(state: GraphState) -> GraphState:
     if not retention_plan_data or "retention_plan" not in retention_plan_data:
         logger.warning("No retention plan. Skipping Retention Tip Executor.")
         retention_tip_executor_span.event("retention_plan_missing", "No Retention Plan Found")
-        retention_tip_executor_span.end() # end the span
+        retention_tip_executor_span.end()
         return state
 
     modules_retention = retention_plan_data["retention_plan"]["module_retention"]
@@ -604,93 +637,93 @@ def retention_tip_executor(state: GraphState) -> GraphState:
                 instruction = tip_description
                 prompt_template = "Create a markdown table: {instruction}. Respond with only the markdown table."
                 prompt = PromptTemplate.from_template(prompt_template)
-
             elif tip_type == "real_world_example":
                 instruction = tip_description
                 prompt_template = "Provide a real-world example: {instruction}. Respond in 2-3 sentences."
                 prompt = PromptTemplate.from_template(prompt_template)
-
             elif tip_type == "analogy":
                 instruction = tip_description
                 prompt_template = "Expand on the following analogy: {instruction}. Explain in 2-3 sentences."
                 prompt = PromptTemplate.from_template(prompt_template)
-
             elif tip_type == "mnemonic_device":
                 instruction = tip_description
                 prompt_template = "Explain this mnemonic and how it helps: {instruction}. Explain in 2-3 sentences."
                 prompt = PromptTemplate.from_template(prompt_template)
-
             elif tip_type == "categorization":
                 instruction = tip_description
                 prompt_template = "Provide an example of categorization: {instruction}. Give a short example in 2-3 sentences."
                 prompt = PromptTemplate.from_template(prompt_template)
-
             elif tip_type == "prioritization":
                 instruction = tip_description
                 prompt_template = "Explain how to prioritize based on: {instruction}. Explain in 2-3 sentences."
                 prompt = PromptTemplate.from_template(prompt_template)
-
             elif tip_type == "role_playing":
                 instruction = tip_description
                 prompt_template = "Suggest a role-playing scenario: {instruction}. Describe a brief scenario (2-4 sentences)."
                 prompt = PromptTemplate.from_template(prompt_template)
-
             elif tip_type == "example":
                 instruction = tip_description
                 prompt_template = "Provide an example: {instruction}. Respond in 2-3 sentences."
                 prompt = PromptTemplate.from_template(prompt_template)
-
             elif tip_type == "explanation":
                 instruction = tip_description
                 prompt_template = "Provide an explanation: {instruction}. Respond in 2-3 sentences."
                 prompt = PromptTemplate.from_template(prompt_template)
-
             elif tip_type == "summary":
                 instruction = tip_description
                 prompt_template = "Provide a summary: {instruction}. Respond in 2-3 sentences."
                 prompt = PromptTemplate.from_template(prompt_template)
-
             elif tip_type == "comparison":
                 instruction = tip_description
                 prompt_template = "Provide a comparison: {instruction}. Respond in 2-3 sentences."
                 prompt = PromptTemplate.from_template(prompt_template)
-
             elif tip_type == "question_generation":
                 instruction = tip_description
                 prompt_template = "Generate 1-2 questions related to: {instruction}. Provide only the questions, not the answers."
                 prompt = PromptTemplate.from_template(prompt_template)
 
             if prompt:
-                chain = prompt | gemini_llm
-
-                messages = [GenerationRequestMessage(role="user", content=prompt_template.format(instruction=instruction))]
+                chain = prompt | gemini_llm # pylint: disable=unsupported-binary-operation
+                messages = [GenerationRequestMessage(role="user",
+                                                     content=prompt_template.format(instruction=instruction))]
                 generation_config = GenerationConfig(
                     id=str(uuid4()),
                     name=f"Retention Tip - {tip_type} - Mod {module_index} - Tip {tip_index}",
                     provider="google",
                     model="gemini-1.5-flash",
                     model_parameters={"temperature": 0.7},
-                    messages=messages
+                    messages=messages,
                 )
-
                 try:
-                    response = call_gemini_with_retry(chain, {"instruction": instruction}, generation_config)
+                    response = call_gemini_with_retry(
+                        chain,
+                        {"instruction": instruction},
+                        generation_config,
+                        retention_tip_executor_span
+                    )
                     executed_content = response.content
                     retention_tip_dict["executed_content"] = executed_content
-                    logger.info(f"Executed retention tip '{tip_type}' for module '{module_retention['module_title']}'.")  # Log module title
-
-                except Exception as e:
-                    logger.exception(f"Retention tip execution error ({tip_type}): {e}")
+                    logger.info("Executed retention tip '%s' for module '%s'.",
+                                 tip_type,
+                                 module_retention["module_title"])
+                    retention_tip_executor_span.event("retention_tip_execution_success", "Retention Tip Execution Succeeded")
+                except (google.api_core.exceptions.GoogleAPIError,
+                        json.JSONDecodeError, ValueError) as e:
+                    logger.exception("Retention tip execution error (%s): %s", tip_type, e)
                     retention_tip_dict["executed_content"] = "Error"
-                    retention_tip_executor_span.event(f"retention_tip_error_{tip_type}", "Retention Tip Error", {"error": str(e)})
+                    retention_tip_executor_span.event(
+                        f"retention_tip_error_{tip_type}",
+                        "Retention Tip Error",
+                        {"error": str(e)}
+                    )
             else:
-                retention_tip_executor_span.event(f"unknown_tip_type_{tip_type}", "Unknown Tip Type")
+                retention_tip_executor_span.event(f"unknown_tip_type_{tip_type}",
+                                                  "Unknown Tip Type")
                 retention_tip_dict["executed_content"] = "Unknown"
-    retention_tip_executor_span.end() # end span
+    retention_tip_executor_span.end()
     state["retention_plan"] = retention_plan_data
     return state
 
-# --- Graph Definition ---
 graph = StateGraph(GraphState)
 graph.add_node("content_structurer", content_structurer)
 graph.add_node("frame_selector", frame_selector)
@@ -706,5 +739,4 @@ graph.add_edge("retention_designer", "retention_tip_executor")
 graph.add_edge("retention_tip_executor", END)
 graph.set_entry_point("content_structurer")
 
-# Compile the Graph
 app = graph.compile(checkpointer=memory)

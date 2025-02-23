@@ -1,7 +1,11 @@
+"""
+This module provides helper functions to clean JSON strings extracted from markdown 
+and to encode images to base64.
+"""
 
 import json
 import logging
-from typing import TypedDict, List, Dict, Optional, Any
+from typing import Optional
 import base64
 import re
 
@@ -12,22 +16,32 @@ logging.basicConfig(
 logger = logging.getLogger("langgraph_agentic")
 
 
-def clean_json_string(json_string_with_markdown):
+def clean_json_string(json_string_with_markdown: Optional[str]) -> str:
+    """
+    Clean a JSON string extracted from markdown text.
+
+    Parameters:
+        json_string_with_markdown (Optional[str]): The JSON string possibly embedded in markdown.
+
+    Returns:
+        str: Cleaned JSON string if valid, otherwise an empty string.
+    """
     if json_string_with_markdown is None:
         return ""
-    cleaned_string = json_string_with_markdown.strip()
-    json_match = re.search(r"\{.*\}", cleaned_string, re.DOTALL)
+    cleaned_string: str = json_string_with_markdown.strip()
+    json_match: Optional[re.Match[str]] = re.search(r"\{.*\}", cleaned_string, re.DOTALL)
     if json_match:
-        extracted_json = json_match.group(0)
+        extracted_json: str = json_match.group(0)
         try:
-            json.loads(extracted_json) # Try to parse to validate it's actually JSON
-            logger.info(f"Extracted JSON using regex: {extracted_json}") # Log when regex extraction works
-            return extracted_json # Return the extracted JSON if valid
+            json.loads(extracted_json)  # Validate JSON
+            logger.info("Extracted JSON using regex: %s", extracted_json)
+            return extracted_json
         except json.JSONDecodeError:
-            logger.warning(f"Regex extracted potential JSON, but it's invalid: {extracted_json}. Falling back to basic cleaning.")
-            # Fallback to basic cleaning if regex extraction fails to parse
+            logger.warning(
+                "Regex extracted potential JSON, but it's invalid: %s. Falling back to basic cleaning.", # pylint: disable=line-too-long
+                extracted_json
+            )
 
-    # Basic cleaning (original logic - still helpful for responses that are *almost* JSON)
     if cleaned_string.startswith("```json"):
         cleaned_string = cleaned_string[7:]
     elif cleaned_string.startswith("```"):
@@ -37,32 +51,55 @@ def clean_json_string(json_string_with_markdown):
     cleaned_string = cleaned_string.strip()
 
     try:
-        json.loads(cleaned_string) # Try to parse after basic cleaning
-        return cleaned_string # Return if basic cleaning works
+        json.loads(cleaned_string)
+        return cleaned_string
     except json.JSONDecodeError:
-        logger.warning(f"Basic cleaning failed to produce valid JSON from: '{json_string_with_markdown}'. Returning empty string.")
+        logger.warning(
+            "Basic cleaning failed to produce valid JSON from: '%s'. Returning empty string.",
+            json_string_with_markdown
+        )
         return ""
 
 
-# --- Helper function to encode images to base64 ---
 def encode_image(image_path: str) -> Optional[str]:
-    """Encodes an image to base64."""
+    """
+    Encodes an image to base64.
+
+    Parameters:
+        image_path (str): The path to the image file.
+
+    Returns:
+        Optional[str]: The base64 encoded string if successful, otherwise None.
+    """
     try:
         with open(image_path, "rb") as image_file:
             return base64.b64encode(image_file.read()).decode("utf-8")
     except FileNotFoundError:
-        logger.error(f"Image file not found: {image_path}")
+        logger.error("Image file not found: %s", image_path)
         return None
-    except Exception as e:
-        logger.error(f"Error encoding image: {e}")
+    except Exception as e: # pylint: disable=broad-except
+        logger.error("Error encoding image: %s", e)
         return None
-    
-# # --- Helper function for Google Custom Search API Calls ---
+
+
+
+
+# from tenacity import retry, stop_after_attempt, wait_exponential
 # @retry(stop=stop_after_attempt(2), wait=wait_exponential(multiplier=2, min=5, max=20))
 # def google_image_search(query: str, api_key: str, cse_id: str) -> Optional[str]:
-#     """Performs a Google Custom Search for images."""
-#     url = "https://www.googleapis.com/customsearch/v1"
-#     params = {
+#     """
+#     Performs a Google Custom Search for images.
+#
+#     Parameters:
+#         query (str): The search query.
+#         api_key (str): Google API key.
+#         cse_id (str): Google Custom Search Engine ID.
+#
+#     Returns:
+#         Optional[str]: The URL of the first image result if found, otherwise None.
+#     """
+#     url: str = "https://www.googleapis.com/customsearch/v1"
+#     params: dict[str, Any] = {
 #         "key": api_key,
 #         "cx": cse_id,
 #         "q": query,
@@ -73,16 +110,16 @@ def encode_image(image_path: str) -> Optional[str]:
 #         response = requests.get(url, params=params)
 #         response.raise_for_status()
 #         results = response.json()
-
+#
 #         if "items" in results and results["items"]:
 #             return results["items"][0]["link"]
 #         else:
-#             logger.warning(f"No image results found for query: {query}")
+#             logger.warning("No image results found for query: %s", query)
 #             return None
-
+#
 #     except requests.exceptions.RequestException as e:
-#         logger.error(f"Error during Google Custom Search API call: {e}")
+#         logger.error("Error during Google Custom Search API call: %s", e)
 #         return None
 #     except (KeyError, IndexError) as e:
-#         logger.error(f"Error parsing Google Custom Search API response: {e}")
+#         logger.error("Error parsing Google Custom Search API response: %s", e)
 #         return None
